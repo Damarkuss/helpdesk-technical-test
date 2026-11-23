@@ -10,7 +10,7 @@ import PriorityBadge from '../components/PriorityBadge.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { useAuthStore } from '../stores/auth'
 import { useToastStore } from '../stores/toast'
-import { PRIORITIES, PRIORITY_LABELS, categoryLabel, formatDateTime, transitionLabel, transitionTone } from '../utils/format'
+import { PRIORITIES, PRIORITY_LABELS, STATUS_LABELS, categoryLabel, formatDateTime, transitionLabel, transitionTone } from '../utils/format'
 
 const props = defineProps({ id: { type: String, required: true } })
 
@@ -73,7 +73,6 @@ async function patch(changes, successMessage) {
 
 function changeStatus(to) {
   const from = ticket.value.status
-  const label = transitionLabel(from, to)
   if (from === 'open' && to === 'closed') {
     confirm.value = {
       title: 'Cancel this ticket?',
@@ -84,7 +83,7 @@ function changeStatus(to) {
     }
     return
   }
-  patch({ status: to }, `${label}: done.`)
+  patch({ status: to }, `Ticket is now ${STATUS_LABELS[to].toLowerCase()}.`)
 }
 
 async function changePriority(event) {

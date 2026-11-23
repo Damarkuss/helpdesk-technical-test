@@ -17,7 +17,7 @@ var workflow = []transition{
 	{From: StatusOpen, To: StatusInProgress, Agent: true, Admin: true},
 	{From: StatusInProgress, To: StatusResolved, Agent: true, Admin: true},
 	{From: StatusResolved, To: StatusClosed, Agent: true, Admin: true, Owner: true},
-	{From: StatusResolved, To: StatusOpen, Owner: true}, // requester reopens
+	{From: StatusResolved, To: StatusOpen, Owner: true},            // requester reopens
 	{From: StatusOpen, To: StatusClosed, Admin: true, Owner: true}, // requester cancels
 }
 

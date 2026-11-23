@@ -1,1 +1,406 @@
-# placeholder, replaced in docs step
+openapi: 3.0.3
+info:
+  title: Helpdesk API
+  version: 1.0.0
+  description: |
+    REST API for an internal helpdesk: employees create tickets, agents handle them,
+    admins manage users.
+
+    **Authentication.** Call `POST /api/auth/login`, then send the returned token as
+    `Authorization: Bearer <token>`.
+
+    **Errors** always have the shape `{"error": {"code", "message", "fields?"}}`:
+
+    | Status | When |
+    |--------|------|
+    | 400 | Malformed JSON, unknown JSON field, or a non-numeric query parameter |
+    | 401 | Missing/invalid/expired token, or wrong login credentials |
+    | 403 | Authenticated but the role (or ownership) does not allow it |
+    | 404 | Resource or route does not exist |
+    | 409 | Conflict: duplicate email, closed ticket, concurrent change |
+    | 422 | Validation failed (`fields` explains each one) or the status transition is not allowed (`invalid_transition`) |
+
+    **Ticket workflow.** `open → in_progress → resolved → closed`, plus `resolved → open` (reopen)
+    and `open → closed` (cancel). Who may take each step is listed under `PATCH /api/tickets/{id}`.
+servers:
+  - url: http://localhost:8080
+    description: Local (docker compose or `go run`)
+tags:
+  - name: Auth
+  - name: Tickets
+  - name: Users
+  - name: System
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [System]
+      summary: Liveness and database check
+      security: []
+      responses:
+        '200': { description: Healthy, content: { application/json: { schema: { type: object, properties: { status: { type: string, example: ok } } } } } }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/meta:
+    get:
+      tags: [System]
+      summary: Allowed values for categories, priorities, statuses and roles
+      security: []
+      responses:
+        '200':
+          description: Enumerations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  categories: { type: array, items: { type: string } }
+                  priorities: { type: array, items: { $ref: '#/components/schemas/Priority' } }
+                  statuses: { type: array, items: { $ref: '#/components/schemas/Status' } }
+                  roles: { type: array, items: { $ref: '#/components/schemas/Role' } }
+
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Create a requester account
+      description: Self-registration always creates a `requester`. Staff roles are granted by an admin.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 2, maxLength: 100, example: Dewi Lestari }
+                email: { type: string, format: email, example: dewi@example.com }
+                password: { type: string, minLength: 8, maxLength: 128, format: password }
+      responses:
+        '201': { description: Account created and signed in, content: { application/json: { schema: { $ref: '#/components/schemas/AuthResult' } } } }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              additionalProperties: false
+              properties:
+                email: { type: string, format: email, example: requester@helpdesk.local }
+                password: { type: string, format: password }
+      responses:
+        '200': { description: Signed in, content: { application/json: { schema: { $ref: '#/components/schemas/AuthResult' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/me:
+    get:
+      tags: [Auth]
+      summary: Current user
+      responses:
+        '200': { description: The signed-in user, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/tickets:
+    get:
+      tags: [Tickets]
+      summary: List tickets
+      description: Requesters only ever receive their own tickets; agents and admins receive all.
+      parameters:
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/Status' } }
+        - { name: priority, in: query, schema: { $ref: '#/components/schemas/Priority' } }
+        - name: assignee
+          in: query
+          description: '`me`, `unassigned`, or a user id'
+          schema: { type: string }
+        - { name: q, in: query, description: Case-insensitive title search, schema: { type: string } }
+        - name: sort
+          in: query
+          schema: { type: string, enum: [created_at, updated_at, title, status, priority], default: created_at }
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: desc } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: A page of tickets
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageMeta'
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/TicketView' } }
+        '401': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Tickets]
+      summary: Create a ticket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, description]
+              additionalProperties: false
+              properties:
+                title: { type: string, minLength: 3, maxLength: 200 }
+                description: { type: string, minLength: 1, maxLength: 5000 }
+                category: { type: string, default: general, description: See /api/meta }
+                priority: { $ref: '#/components/schemas/Priority' }
+      responses:
+        '201':
+          description: Created
+          headers:
+            Location: { schema: { type: string }, example: /api/tickets/12 }
+          content: { application/json: { schema: { $ref: '#/components/schemas/TicketView' } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/tickets/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    get:
+      tags: [Tickets]
+      summary: Ticket with its comments
+      description: |
+        Allowed for the ticket's owner, agents and admins. Other requesters get 403.
+        Internal notes are only included for agents and admins.
+      responses:
+        '200': { description: Ticket detail, content: { application/json: { schema: { $ref: '#/components/schemas/TicketDetail' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Tickets]
+      summary: Change status, priority, assignee or content
+      description: |
+        Send only the fields to change.
+
+        **Status transitions** (anything else is rejected with `422 invalid_transition`; an allowed
+        edge used by the wrong role gets `403`):
+
+        | From | To | Who |
+        |------|----|-----|
+        | open | in_progress | agent, admin (an unassigned ticket is assigned to the actor) |
+        | in_progress | resolved | agent, admin |
+        | resolved | closed | owner, agent, admin |
+        | resolved | open | owner only (reopen) |
+        | open | closed | owner (cancel), admin |
+
+        **Other fields.** `priority` and `assignee_id`: agents and admins; an agent may only assign
+        themselves, an admin may assign any agent/admin, `null` unassigns. `title`, `description`,
+        `category`: staff, or the owner while the ticket is `open`. A `closed` ticket is read-only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                status: { $ref: '#/components/schemas/Status' }
+                priority: { $ref: '#/components/schemas/Priority' }
+                assignee_id: { type: integer, format: int64, nullable: true }
+                title: { type: string }
+                description: { type: string }
+                category: { type: string }
+            examples:
+              start: { summary: Start working, value: { status: in_progress } }
+              assign: { summary: Assign to a user, value: { assignee_id: 2 } }
+      responses:
+        '200': { description: Updated ticket, content: { application/json: { schema: { $ref: '#/components/schemas/TicketView' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Tickets]
+      summary: Delete a ticket (admin)
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/tickets/{id}/comments:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    post:
+      tags: [Tickets]
+      summary: Add a comment or an internal note
+      description: |
+        Owner, agents and admins can comment. `is_internal: true` creates a note visible only to
+        agents and admins and is rejected with 403 for requesters. Closed tickets return 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              additionalProperties: false
+              properties:
+                body: { type: string, minLength: 1, maxLength: 5000 }
+                is_internal: { type: boolean, default: false }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Comment' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /api/agents:
+    get:
+      tags: [Users]
+      summary: Agents and admins that tickets can be assigned to (agent, admin)
+      responses:
+        '200':
+          description: List
+          content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/UserRef' } } } } } }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/users:
+    get:
+      tags: [Users]
+      summary: List users (admin)
+      parameters:
+        - { name: q, in: query, description: Name or email contains, schema: { type: string } }
+        - { name: role, in: query, schema: { $ref: '#/components/schemas/Role' } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: A page of users
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageMeta'
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/User' } }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/users/{id}/role:
+    patch:
+      tags: [Users]
+      summary: Change a user's role (admin)
+      description: An admin cannot change their own role (409 `cannot_change_own_role`).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              additionalProperties: false
+              properties:
+                role: { $ref: '#/components/schemas/Role' }
+      responses:
+        '200': { description: Updated user, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: validation_error, message: one or more fields are invalid, fields: { title: must be at least 3 characters } } }
+  schemas:
+    Role: { type: string, enum: [requester, agent, admin] }
+    Status: { type: string, enum: [open, in_progress, resolved, closed] }
+    Priority: { type: string, enum: [low, medium, high, urgent] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: invalid_transition }
+            message: { type: string }
+            fields: { type: object, additionalProperties: { type: string } }
+    User:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: '#/components/schemas/Role' }
+        created_at: { type: string, format: date-time }
+    UserRef:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+    AuthResult:
+      type: object
+      properties:
+        token: { type: string }
+        expires_at: { type: string, format: date-time }
+        user: { $ref: '#/components/schemas/User' }
+    PageMeta:
+      type: object
+      properties:
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+        total_pages: { type: integer }
+    Ticket:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        title: { type: string }
+        description: { type: string }
+        category: { type: string }
+        priority: { $ref: '#/components/schemas/Priority' }
+        status: { $ref: '#/components/schemas/Status' }
+        requester: { $ref: '#/components/schemas/UserRef' }
+        assignee: { allOf: [{ $ref: '#/components/schemas/UserRef' }], nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TicketView:
+      allOf:
+        - $ref: '#/components/schemas/Ticket'
+        - type: object
+          properties:
+            allowed_transitions:
+              type: array
+              description: Statuses the current user may move this ticket to right now
+              items: { $ref: '#/components/schemas/Status' }
+            is_overdue:
+              type: boolean
+              description: Urgent ticket still `open` after the SLA window (default 4h)
+    TicketDetail:
+      allOf:
+        - $ref: '#/components/schemas/TicketView'
+        - type: object
+          properties:
+            comments: { type: array, items: { $ref: '#/components/schemas/Comment' } }
+    Comment:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        ticket_id: { type: integer, format: int64 }
+        author: { $ref: '#/components/schemas/UserRef' }
+        body: { type: string }
+        is_internal: { type: boolean }
+        created_at: { type: string, format: date-time }

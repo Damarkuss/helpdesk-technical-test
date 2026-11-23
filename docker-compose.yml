@@ -1,0 +1,54 @@
+# One command to run everything:  docker compose up --build
+#   UI:  http://localhost:3000        API: http://localhost:8080 (docs at /api/docs)
+#
+# The ${VAR:-default} values are DEMO defaults so a reviewer can start the app
+# with no setup. For anything real, copy .env.example to .env and set your own.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: helpdesk
+      POSTGRES_USER: helpdesk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-helpdesk-demo-password}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U helpdesk -d helpdesk"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://helpdesk:${POSTGRES_PASSWORD:-helpdesk-demo-password}@db:5432/helpdesk?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:-demo-only-secret-change-me-0123456789abcdef}
+      JWT_TTL: 24h
+      URGENT_SLA: 4h
+      SEED_ENABLED: "true"
+      SEED_PASSWORD: ${SEED_PASSWORD:-Password123!}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+volumes:
+  db-data:
